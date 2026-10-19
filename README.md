@@ -26,10 +26,8 @@ cp .env.example .env
 docker compose up -d          # PostgreSQL + PostGIS on 127.0.0.1:5440
 ./db/migrate.sh               # applies pending migrations
 
-# 2. Data (one postcode area at a time, see etl/areas.csv)
-./etl/import.sh 20143
-./etl/import.sh 20146
-./etl/import.sh 20149
+# 2. Data: all of Milan inside the outer ring road (circonvallazione esterna)
+./etl/import.sh milano
 
 # 3. Web app
 cd apps/web
@@ -38,9 +36,11 @@ npm install
 npm run dev                   # http://localhost:3000
 ```
 
-Each import takes well under a minute and is idempotent: running it again updates existing places
-without creating duplicates. To add an area, add a row (postcode + bounding box) to
-`etl/areas.csv`. To start from scratch: `docker compose down -v && docker compose up -d && ./db/migrate.sh`.
+The Milan import takes a few minutes (downloads are cached in `data/`) and is idempotent: running
+it again updates existing places without creating duplicates. Areas are defined in `etl/areas.csv`,
+either by a polygon (`etl/areas/milano-circonvallazione.geojson`, the trolleybus 90/91 ring + 60 m)
+or by a postcode; `20143`, `20146` and `20149` are kept to cover the parts of those postcodes outside
+the ring. To start from scratch: `docker compose down -v && docker compose up -d && ./db/migrate.sh`.
 
 ## Architecture
 
@@ -82,11 +82,12 @@ data/            downloaded source files (git-ignored)
 `etl/import.sh <area>` runs three steps, each as *extract → staging table → SQL transform*:
 
 1. **Overture Maps** — DuckDB reads only the area's bounding box from the global Parquet release on
-   S3. Missing postcodes are inferred from the nearest neighbours; records are filtered by postcode
-   and upserted into `places`.
+   S3. Missing postcodes are inferred from the nearest neighbours; records inside the area
+   (`import_areas`, `onqi_in_area()`) are upserted into `places`.
 2. **OpenStreetMap** — Overpass query for shops, amenities, offices and crafts. Each OSM node is
    matched to an existing place within 60 m by name similarity (`onqi_name_score`, penalised by
-   distance, greedy 1:1); unmatched nodes become new places. OSM provides the most precise
+   distance, greedy 1:1, never between a venue and a square/home/stop/school —
+   `onqi_categories_compatible`); unmatched nodes become new places. OSM provides the most precise
    categories and the `opening_hours` tag, parsed by `osm_opening_hours()`.
 3. **Comune di Milano** — official registers of retail shops and food & drink venues. Matched by
    address (street words in any order + house number, `onqi_street_key`) with a compatible type;
@@ -108,17 +109,16 @@ back to OSM tags.
 
 | Route | Purpose |
 |---|---|
-| `GET /api/places?bbox=&lat=&lon=` | public places in the visible map area, sorted by distance |
-| `GET /api/nearby?lat=&lon=&radius=` | public places within a radius |
-| `GET /api/search?q=&lat=&lon=` | name search (accent-insensitive, trigram similarity) |
-| `GET /api/areas` | outline of each imported postcode area |
+| `GET /api/nearby?lat=&lon=&radius=` | public places within a radius (default 500 m), sorted by distance |
+| `GET /api/search?q=&macro=&category=&lat=&lon=` | search the whole area by name and/or type (accent-insensitive, trigram similarity); type only = nearest of that type |
+| `GET /api/areas` | outline of the area covered by data |
 | `GET /api/places/[id]` | full detail of a place, including raw source data |
 | `PATCH /api/places/[id]` | manual edit (fields, opening hours, attributes, visibility) |
 | `GET /api/categories` | categories for the edit form |
 
-The UI (`app/explorer.tsx`) shows the map and a list that follows the visible area, with
-category/open-now filters and search; `app/place-panel.tsx` is the side panel with every stored
-field, editable inline. MapLibre v6 loads its worker from a separate file, copied to
+The UI (`app/explorer.tsx`) asks for the user's location and lists the places within 500 m (tap the
+map to move); the search box and the type selector search the whole city instead.
+`app/place-panel.tsx` is the side panel with every stored field, editable inline. MapLibre v6 loads its worker from a separate file, copied to
 `public/maplibre/` by the `postinstall` script.
 
 > The editing API has no authentication yet — add it before deploying anywhere public.

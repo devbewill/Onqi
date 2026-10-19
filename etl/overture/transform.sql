@@ -1,5 +1,5 @@
 -- Dalla staging Overture a places / place_sources per un'area.
--- Variabili psql: area, postcode
+-- Variabili psql: area (vedi import_areas)
 \set ON_ERROR_STOP on
 BEGIN;
 
@@ -21,7 +21,7 @@ SET postcode_inferred = (
 )
 WHERE s.area = :'area' AND s.postcode IS NULL;
 
--- 2. Record da importare: CAP dell'area, non chiusi, affidabili. Si importano tutte
+-- 2. Record da importare: dentro l'area (CAP o poligono), non chiusi, affidabili. Si importano tutte
 --    le categorie (anche non pubbliche): la dettagliata vince sulla generica e
 --    quelle non mappate finiscono in 'altro'.
 CREATE TEMP TABLE candidates ON COMMIT DROP AS
@@ -33,7 +33,7 @@ LEFT JOIN category_mappings m
 LEFT JOIN category_mappings d
   ON d.source = 'overture_detail' AND d.source_category = s.category
 WHERE s.area = :'area'
-  AND coalesce(s.postcode, s.postcode_inferred) = :'postcode'
+  AND onqi_in_area(:'area', s.geom, coalesce(s.postcode, s.postcode_inferred))
   AND s.name IS NOT NULL
   AND s.confidence >= 0.3;
 
@@ -72,7 +72,8 @@ SELECT c.id AS source_id, p.id AS place_id,
 FROM candidates c
 JOIN places p ON ST_DWithin(p.geom, c.geom, 60)
 WHERE NOT EXISTS (SELECT 1 FROM place_sources ps WHERE ps.source = 'overture' AND ps.source_id = c.id)
-  AND NOT EXISTS (SELECT 1 FROM place_sources ps WHERE ps.place_id = p.id AND ps.source = 'overture');
+  AND NOT EXISTS (SELECT 1 FROM place_sources ps WHERE ps.place_id = p.id AND ps.source = 'overture')
+  AND onqi_categories_compatible(c.category_id, p.category_id);
 DELETE FROM pairs WHERE score < 0.45;
 
 DO $$

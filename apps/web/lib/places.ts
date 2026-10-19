@@ -37,47 +37,40 @@ export function parsePoint(params: URLSearchParams): Point | null {
   return { lat, lon };
 }
 
-export async function placesWithinRadius(from: Point, radius: number) {
+export async function placesWithinRadius(from: Point, radius: number, limit: number) {
   const { rows } = await pool.query<NearbyPlace>(
     `SELECT ${PLACE_FIELDS}
        FROM places p ${PLACE_JOINS}
       WHERE p.status <> 'closed' AND p.is_public
         AND ST_DWithin(p.geom, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography, $3)
       ORDER BY distance
-      LIMIT 300`,
-    [from.lon, from.lat, radius],
+      LIMIT $4`,
+    [from.lon, from.lat, radius, limit],
   );
   return rows;
 }
 
-export async function placesInBox(from: Point, bbox: [number, number, number, number], limit: number) {
-  const { rows } = await pool.query<NearbyPlace>(
-    `SELECT ${PLACE_FIELDS}
-       FROM places p ${PLACE_JOINS}
-      WHERE p.status <> 'closed' AND p.is_public
-        AND p.geom && ST_MakeEnvelope($3, $4, $5, $6, 4326)::geography
-      ORDER BY distance
-      LIMIT $7`,
-    [from.lon, from.lat, ...bbox, limit],
-  );
-  return rows;
-}
+export type SearchFilter = { macro?: string; category?: string };
 
-// Prima i nomi che contengono il testo cercato, poi i più simili; a parità, i più vicini.
-export async function searchPlaces(from: Point, q: string, limit: number) {
+// Ricerca in tutta l'area importata. Con un testo: prima i nomi che iniziano o
+// contengono il testo, poi i più simili; a parità, i più vicini. Senza testo
+// (solo tipologia): i più vicini di quella tipologia.
+export async function searchPlaces(from: Point, q: string, filter: SearchFilter, limit: number) {
   const { rows } = await pool.query<NearbyPlace>(
     `SELECT ${PLACE_FIELDS}
        FROM places p ${PLACE_JOINS},
             LATERAL (SELECT onqi_norm_name($3) AS q) s
       WHERE p.status <> 'closed' AND p.is_public
-        AND s.q <> ''
-        AND (onqi_norm_name(p.name) LIKE '%' || s.q || '%' OR onqi_norm_name(p.name) % s.q)
-      ORDER BY (onqi_norm_name(p.name) LIKE s.q || '%') DESC,
-               (onqi_norm_name(p.name) LIKE '%' || s.q || '%') DESC,
-               similarity(onqi_norm_name(p.name), s.q) DESC,
+        AND ($5::text IS NULL OR m.slug = $5)
+        AND ($6::text IS NULL OR c.slug = $6)
+        AND ($3 = '' OR (s.q <> '' AND (onqi_norm_name(p.name) LIKE '%' || s.q || '%'
+                                        OR onqi_norm_name(p.name) % s.q)))
+      ORDER BY CASE WHEN $3 = '' THEN 0 ELSE (onqi_norm_name(p.name) LIKE s.q || '%')::int END DESC,
+               CASE WHEN $3 = '' THEN 0 ELSE (onqi_norm_name(p.name) LIKE '%' || s.q || '%')::int END DESC,
+               CASE WHEN $3 = '' THEN 0 ELSE similarity(onqi_norm_name(p.name), s.q) END DESC,
                distance
       LIMIT $4`,
-    [from.lon, from.lat, q, limit],
+    [from.lon, from.lat, q, limit, filter.macro ?? null, filter.category ?? null],
   );
   return rows;
 }

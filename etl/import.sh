@@ -10,7 +10,7 @@ RELEASE="${2:-$(curl -s https://stac.overturemaps.org/catalog.json | sed -E 's/.
 
 ROW=$(awk -F, -v a="$AREA" 'NR > 1 && $1 == a' etl/areas.csv)
 [ -n "$ROW" ] || { echo "Area '$AREA' non trovata in etl/areas.csv" >&2; exit 1; }
-IFS=, read -r _ POSTCODE XMIN XMAX YMIN YMAX <<< "$ROW"
+IFS=, read -r _ POSTCODE POLYGON XMIN XMAX YMIN YMAX <<< "$ROW"
 
 FILE="data/overture_${AREA}_${RELEASE}.parquet"
 PG="host=127.0.0.1 port=${POSTGRES_PORT} dbname=${POSTGRES_DB} user=${POSTGRES_USER} password=${POSTGRES_PASSWORD}"
@@ -30,8 +30,21 @@ duckdb -bail -cmd "INSTALL postgres; LOAD postgres; ATTACH '$PG' AS pg (TYPE pos
 
 psql_() { docker exec -i onqi-db psql -q -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"; }
 
+# Definizione dell'area: un CAP oppure un poligono GeoJSON (etl/areas/*.geojson)
+if [ -n "$POLYGON" ]; then
+  GEOJSON=$(python3 -I -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["geometry"]))' "etl/areas/$POLYGON")
+else
+  GEOJSON=""
+fi
+psql_ -v code="$AREA" -v postcode="$POSTCODE" -v geojson="$GEOJSON" <<'SQL'
+INSERT INTO import_areas (code, postcode, geom)
+VALUES (:'code', nullif(:'postcode', ''),
+        CASE WHEN :'geojson' <> '' THEN ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:'geojson'), 4326)) END)
+ON CONFLICT (code) DO UPDATE SET postcode = excluded.postcode, geom = excluded.geom;
+SQL
+
 echo "==> Trasformazione Overture in places"
-psql_ -v area="$AREA" -v postcode="$POSTCODE" < etl/overture/transform.sql
+psql_ -v area="$AREA" < etl/overture/transform.sql
 
 # --- OpenStreetMap (Overpass) ---------------------------------------------
 OSM_FILE="data/osm_${AREA}.json"
@@ -40,7 +53,7 @@ if [ ! -f "$OSM_FILE" ]; then
   QUERY=$(sed "s/{{bbox}}/$YMIN,$XMIN,$YMAX,$XMAX/g" etl/osm/query.overpassql)
   for wait in 0 15 30 60 120; do
     sleep "$wait"
-    curl -s -m 200 -A "onqi-etl/0.1" --data-urlencode "data=$QUERY" \
+    curl -s -m 400 -A "onqi-etl/0.1" --data-urlencode "data=$QUERY" \
       https://overpass-api.de/api/interpreter -o "$OSM_FILE.tmp" || true
     if grep -q '"elements"' "$OSM_FILE.tmp" 2>/dev/null; then mv "$OSM_FILE.tmp" "$OSM_FILE"; break; fi
     echo "    Overpass occupato, riprovo..."
@@ -53,7 +66,7 @@ duckdb -bail -cmd "INSTALL postgres; LOAD postgres; ATTACH '$PG' AS pg (TYPE pos
              SET VARIABLE area='$AREA'; SET VARIABLE file='$OSM_FILE';" < etl/osm/load.sql
 
 echo "==> Abbinamento OSM e orari"
-psql_ -v area="$AREA" -v postcode="$POSTCODE" < etl/osm/transform.sql
+psql_ -v area="$AREA" < etl/osm/transform.sql
 
 # --- Comune di Milano: esercizi di vicinato e pubblici esercizi -------------
 COMUNE_BASE="https://dati.comune.milano.it/dataset"
@@ -75,8 +88,10 @@ duckdb -bail -cmd "INSTALL postgres; LOAD postgres; ATTACH '$PG' AS pg (TYPE pos
              SET VARIABLE dir='data';" < etl/comune/load.sql
 
 echo "==> Abbinamento Comune"
-psql_ -v postcode="$POSTCODE" < etl/comune/transform.sql
+psql_ -v area="$AREA" < etl/comune/transform.sql
 
-psql_ -c "SELECT count(*) AS places,
-                 count(*) FILTER (WHERE EXISTS (SELECT 1 FROM opening_hours o WHERE o.place_id = p.id)) AS con_orari
-          FROM places p WHERE postcode = '$POSTCODE';"
+psql_ -v area="$AREA" <<'SQL'
+SELECT count(*) AS places, count(*) FILTER (WHERE is_public) AS pubblici,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM opening_hours o WHERE o.place_id = p.id)) AS con_orari
+FROM places p WHERE onqi_in_area(:'area', p.geom, p.postcode);
+SQL

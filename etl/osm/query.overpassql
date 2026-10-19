@@ -1,4 +1,4 @@
-[out:json][timeout:180];
+[out:json][timeout:300];
 (
   nwr["shop"]["name"]({{bbox}});
   nwr["amenity"~"^(bar|pub|cafe|restaurant|fast_food|ice_cream|biergarten|food_court|pharmacy|nightclub|cinema|theatre|arts_centre|marketplace|car_rental|bicycle_rental|internet_cafe|casino|bank|post_office|community_centre|social_centre|social_facility|library|fuel|veterinary|place_of_worship|clinic|dentist|doctors)$"]["name"]({{bbox}});

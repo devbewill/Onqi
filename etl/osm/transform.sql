@@ -1,6 +1,6 @@
 -- Da staging OSM a places: abbina ai place esistenti, aggiunge i mancanti,
 -- importa gli orari. Da eseguire dopo l'import Overture della stessa area.
--- Variabili psql: area, postcode
+-- Variabili psql: area (vedi import_areas)
 \set ON_ERROR_STOP on
 BEGIN;
 
@@ -32,7 +32,7 @@ LEFT JOIN category_mappings m ON m.source = 'osm' AND m.source_category = s.osm_
 LEFT JOIN category_mappings k
   ON k.source = 'osm' AND k.source_category = split_part(s.osm_tag, '=', 1) || '=*'
 WHERE s.area = :'area'
-  AND coalesce(s.postcode, s.postcode_inferred) = :'postcode';
+  AND onqi_in_area(:'area', s.geom, coalesce(s.postcode, s.postcode_inferred));
 
 -- 2. Abbinamento: record OSM già collegati in import precedenti...
 CREATE TEMP TABLE matches ON COMMIT DROP AS
@@ -48,7 +48,8 @@ SELECT c.source_id, p.id AS place_id,
 FROM candidates c
 JOIN places p ON ST_DWithin(p.geom, c.geom, 60)
 WHERE NOT EXISTS (SELECT 1 FROM matches mm WHERE mm.source_id = c.source_id)
-  AND NOT EXISTS (SELECT 1 FROM place_sources ps WHERE ps.place_id = p.id AND ps.source = 'osm');
+  AND NOT EXISTS (SELECT 1 FROM place_sources ps WHERE ps.place_id = p.id AND ps.source = 'osm')
+  AND onqi_categories_compatible(c.category_id, p.category_id);
 DELETE FROM pairs WHERE score < 0.45;
 
 DO $$
