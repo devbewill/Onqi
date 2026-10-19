@@ -1,0 +1,20 @@
+services:
+  db:
+    image: imresamu/postgis:17-3.5  # build multi-arch (arm64) di docker-postgis
+    container_name: onqi-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-onqi}
+      POSTGRES_USER: ${POSTGRES_USER:-onqi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-onqi}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5440}:5432"
+    volumes:
+      - onqi-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-onqi} -d ${POSTGRES_DB:-onqi}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  onqi-pgdata:
