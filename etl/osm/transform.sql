@@ -94,6 +94,15 @@ WITH new AS MATERIALIZED (
 )
 INSERT INTO matches SELECT source_id, place_id FROM new;
 
+-- 4b. Dettagli extra dai tag OSM (accessibilità, cucina, pagamenti...). Il
+--     valore confermato a mano resta in attributes, che l'import non tocca.
+UPDATE places p
+SET source_attributes = onqi_osm_attributes(c.t)
+FROM matches m
+JOIN candidates c ON c.source_id = m.source_id
+WHERE p.id = m.place_id
+  AND p.source_attributes IS DISTINCT FROM onqi_osm_attributes(c.t);
+
 -- Provenienza per tutti i record OSM dell'area (nuovi e abbinati).
 INSERT INTO place_sources (source, source_id, place_id, raw)
 SELECT 'osm', m.source_id, m.place_id, c.t

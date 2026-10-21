@@ -47,18 +47,65 @@ echo "==> Trasformazione Overture in places"
 psql_ -v area="$AREA" < etl/overture/transform.sql
 
 # --- OpenStreetMap (Overpass) ---------------------------------------------
+# Il bbox viene diviso in tile: le query piccole vanno molto meglio di una
+# query su tutta la città (che Overpass rifiuta quando è saturo). Ogni tile
+# prova a turno i mirror pubblici.
 OSM_FILE="data/osm_${AREA}.json"
+OVERPASS_MIRRORS=(
+  "https://overpass-api.de/api/interpreter"
+  "https://overpass.kumi.systems/api/interpreter"
+  "https://overpass.private.coffee/api/interpreter"
+)
+TILES="${OSM_TILES:-3}"
+
 if [ ! -f "$OSM_FILE" ]; then
-  echo "==> Download OSM da Overpass"
-  QUERY=$(sed "s/{{bbox}}/$YMIN,$XMIN,$YMAX,$XMAX/g" etl/osm/query.overpassql)
-  for wait in 0 15 30 60 120; do
-    sleep "$wait"
-    curl -s -m 400 -A "onqi-etl/0.1" --data-urlencode "data=$QUERY" \
-      https://overpass-api.de/api/interpreter -o "$OSM_FILE.tmp" || true
-    if grep -q '"elements"' "$OSM_FILE.tmp" 2>/dev/null; then mv "$OSM_FILE.tmp" "$OSM_FILE"; break; fi
-    echo "    Overpass occupato, riprovo..."
-  done
-  [ -f "$OSM_FILE" ] || { echo "Download OSM fallito" >&2; rm -f "$OSM_FILE.tmp"; exit 1; }
+  echo "==> Download OSM da Overpass ($TILES x $TILES tile)"
+  TILE_DIR="data/osm_${AREA}_tiles"
+  mkdir -p "$TILE_DIR"
+  TILE_LIST=$(awk -v xmin="$XMIN" -v xmax="$XMAX" -v ymin="$YMIN" -v ymax="$YMAX" -v n="$TILES" '
+    BEGIN{ dx = (xmax - xmin) / n; dy = (ymax - ymin) / n
+      for (i = 0; i < n; i++) for (j = 0; j < n; j++) {
+        x1 = xmin + i * dx; x2 = (i == n - 1) ? xmax : xmin + (i + 1) * dx
+        y1 = ymin + j * dy; y2 = (j == n - 1) ? ymax : ymin + (j + 1) * dy
+        printf "%d_%d %.6f,%.6f,%.6f,%.6f\n", i, j, y1, x1, y2, x2
+      } }')
+  OK=1
+  while read -r name bbox; do
+    TILE_FILE="$TILE_DIR/$name.json"
+    [ -f "$TILE_FILE" ] && continue   # tile già scaricato
+    QUERY=$(sed "s/{{bbox}}/$bbox/g" etl/osm/query.overpassql)
+    for attempt in 1 2 3; do
+      for mirror in "${OVERPASS_MIRRORS[@]}"; do
+        curl -s -m 300 -A "onqi-etl/0.1" --data-urlencode "data=$QUERY" \
+          "$mirror" -o "$TILE_FILE.tmp" || true
+        if grep -q '"elements"' "$TILE_FILE.tmp" 2>/dev/null; then
+          mv "$TILE_FILE.tmp" "$TILE_FILE"; break 2
+        fi
+      done
+      echo "    tile $name: Overpass occupato, riprovo ($attempt)..."
+      sleep $((attempt * 20))
+    done
+    [ -f "$TILE_FILE" ] || { echo "    tile $name: fallito" >&2; OK=0; }
+  done <<< "$TILE_LIST"
+
+  if [ "$OK" = "1" ]; then
+    python3 - "$OSM_FILE" "$TILE_DIR"/*.json <<'PY'
+import json, sys
+out, seen = sys.argv[1], {}
+for path in sys.argv[2:]:
+    with open(path) as fh:
+        for e in json.load(fh).get("elements", []):
+            seen[(e.get("type"), e.get("id"))] = e
+with open(out, "w") as fh:
+    json.dump({"elements": list(seen.values())}, fh)
+print(f"    elementi unici: {len(seen)}")
+if not seen:
+    sys.exit("nessun elemento OSM nel merge")
+PY
+  else
+    echo "Download OSM fallito: tile mancanti" >&2
+    exit 1
+  fi
 fi
 
 echo "==> Caricamento OSM in staging"
@@ -89,6 +136,23 @@ duckdb -bail -cmd "INSTALL postgres; LOAD postgres; ATTACH '$PG' AS pg (TYPE pos
 
 echo "==> Abbinamento Comune"
 psql_ -v area="$AREA" < etl/comune/transform.sql
+
+# --- Contesto urbano: quartieri NIL -----------------------------------------
+NIL_URL="https://dati.comune.milano.it/dataset/e8e765fc-d882-40b8-95d8-16ff3d39eb7c/resource/9c4e0776-56fc-4f3d-8a90-f4992a3be426/download/ds964_nil_wm.geojson"
+if [ ! -f data/nil.geojson ]; then
+  echo "==> Download NIL"
+  curl -sf -m 120 -o data/nil.geojson.tmp "$NIL_URL" && mv data/nil.geojson.tmp data/nil.geojson
+fi
+echo "==> Caricamento NIL in staging"
+duckdb -bail -cmd "INSTALL postgres; LOAD postgres; ATTACH '$PG' AS pg (TYPE postgres);
+             SET VARIABLE file='data/nil.geojson';" < etl/urban/nil_load.sql
+echo "==> Assegnazione quartiere"
+psql_ -v area="$AREA" < etl/urban/nil.sql
+
+# --- Fermate e linee del trasporto pubblico (GTFS, tabelle cittadine) --------
+if [ "$(psql_ -tAc "SELECT count(*) FROM transit_stops")" = "0" ]; then
+  etl/gtfs/import.sh
+fi
 
 psql_ -v area="$AREA" <<'SQL'
 SELECT count(*) AS places, count(*) FILTER (WHERE is_public) AS pubblici,

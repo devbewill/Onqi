@@ -3,3 +3,4 @@ area,postcode,polygon,xmin,xmax,ymin,ymax
 20146,20146,,9.115,9.175,45.435,45.480
 20149,20149,,9.125,9.180,45.455,45.505
 milano,,milano-circonvallazione.geojson,9.13,9.24,45.435,45.507
+milano-comune,,milano-comune.geojson,9.033,9.288,45.377,45.546

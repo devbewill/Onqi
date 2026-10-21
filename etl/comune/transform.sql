@@ -6,6 +6,8 @@ BEGIN;
 
 CREATE TEMP TABLE com ON COMMIT DROP AS
 SELECT c.*,
+       (regexp_match(c.ateco, '^(\d[\d.]*\d)\s*[-–]\s*(.+)$'))[1] AS ateco_code,
+       (regexp_match(c.ateco, '^(\d[\d.]*\d)\s*[-–]\s*(.+)$'))[2] AS ateco_label,
        onqi_street_key(c.via) AS skey,
        substring(c.civico FROM '^\d+')::int AS num,
        coalesce(m.category_id, (SELECT id FROM categories WHERE slug = 'negozi_specializzati')) AS category_id
@@ -76,9 +78,11 @@ WITH new AS MATERIALIZED (
   WHERE c.insegna IS NOT NULL AND length(c.insegna) >= 3
     AND NOT EXISTS (SELECT 1 FROM links l WHERE l.codice = c.codice)
 ), ins AS (
-  INSERT INTO places (id, name, category_id, geom, address, postcode, city, status)
+  INSERT INTO places (id, name, category_id, geom, address, postcode, city, status,
+                      ateco, ateco_label)
   SELECT place_id, initcap(insegna), category_id, geom,
-         initcap(via) || ' ' || civico, cap, 'Milano', 'active'
+         initcap(via) || ' ' || civico, cap, 'Milano', 'active',
+         ateco_code, ateco_label
   FROM new
 )
 INSERT INTO links SELECT codice, place_id FROM new;
@@ -97,6 +101,8 @@ SET status     = CASE WHEN p.status = 'unverified' THEN 'active' ELSE p.status E
     name       = CASE WHEN c.insegna IS NOT NULL AND length(c.insegna) >= 3
                            AND p.name ~* '\m(s\.?r\.?l|s\.?n\.?c|s\.?a\.?s|s\.?p\.?a)\M'
                       THEN initcap(c.insegna) ELSE p.name END,
+    ateco       = coalesce(p.ateco, c.ateco_code),
+    ateco_label = coalesce(p.ateco_label, c.ateco_label),
     updated_at = now()
 FROM links l JOIN com c ON c.codice = l.codice
 WHERE p.id = l.place_id;
