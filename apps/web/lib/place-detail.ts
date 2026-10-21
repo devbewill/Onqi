@@ -8,6 +8,16 @@ export type TransitInfo = {
   meters: number;
   lines: { code: string | null; type: number }[];
 };
+export type ParkingInfo = {
+  name: string | null;
+  address: string | null;
+  meters: number;
+  spaces: number | null;
+  kind: string | null;
+  rate: number | null;
+};
+export type BikeParkingInfo = { name: string | null; meters: number; spaces: number | null };
+export type ParkingZoneInfo = { name: string | null; spaces: number | null; rate: number | null };
 
 export type PlaceDetail = {
   id: string;
@@ -38,6 +48,9 @@ export type PlaceDetail = {
   sourceAttributes: Record<string, string>;
   nil: string | null;
   transit: TransitInfo | null;
+  parking: ParkingInfo | null;
+  bikeParking: BikeParkingInfo | null;
+  parkingZone: ParkingZoneInfo | null;
   openNow: boolean | null;
   hours: HoursRow[];
   sources: SourceRecord[];
@@ -71,6 +84,22 @@ export async function getPlaceDetail(id: string) {
                                                     WHERE c.parent_station = s.stop_id)) AS lines
                        FROM transit_stops s
                       ORDER BY s.geom <-> p.geom LIMIT 1) n) AS "transit",
+            (SELECT json_build_object('name', k.name, 'address', k.address, 'meters', k.meters,
+                                      'spaces', k.spaces, 'kind', k.kind, 'rate', k.rate)
+               FROM (SELECT pk.name, pk.address, pk.kind, pk.spaces, pk.rate_eur_h AS rate,
+                            round(ST_Distance(pk.geom::geography, p.geom))::int AS meters
+                       FROM parking pk
+                      WHERE pk.kind IN ('pubblico', 'interscambio', 'turistico')
+                      ORDER BY pk.geom <-> p.geom::geometry LIMIT 1) k) AS "parking",
+            (SELECT json_build_object('name', k.name, 'meters', k.meters, 'spaces', k.spaces)
+               FROM (SELECT pk.name, pk.spaces,
+                            round(ST_Distance(pk.geom::geography, p.geom))::int AS meters
+                       FROM parking pk WHERE pk.kind = 'bici'
+                      ORDER BY pk.geom <-> p.geom::geometry LIMIT 1) k) AS "bikeParking",
+            (SELECT json_build_object('name', k.name, 'spaces', k.spaces, 'rate', k.rate)
+               FROM (SELECT pk.name, pk.spaces, pk.rate_eur_h AS rate
+                       FROM parking pk
+                      WHERE pk.area IS NOT NULL AND ST_Covers(pk.area, p.geom::geometry) LIMIT 1) k) AS "parkingZone",
             onqi_is_open(p.id) AS "openNow",
             coalesce((SELECT json_agg(json_build_object('weekday', h.weekday,
                                                         'opens', to_char(h.opens, 'HH24:MI'),

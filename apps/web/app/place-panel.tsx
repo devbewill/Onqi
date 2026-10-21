@@ -51,6 +51,12 @@ const ATTRIBUTES: { key: string; label: string; osm: string; options?: { value: 
 
 const TRANSIT_TYPE_LABELS: Record<number, string> = { 0: "Tram", 1: "Metro", 3: "Bus" };
 
+const PARKING_KIND_LABELS: Record<string, string> = {
+  pubblico: "Parcheggio pubblico",
+  interscambio: "Parcheggio di interscambio",
+  turistico: "Sosta turistica",
+};
+
 function transitText(t: TransitInfo) {
   const parts = [0, 1, 3]
     .map((ty) => ({
@@ -671,6 +677,40 @@ export default function PlacePanel({
                 hint="11 cifre, verificata con la cifra di controllo"
               />
               {d.transit && <InfoRow label="Trasporto pubblico">{transitText(d.transit)}</InfoRow>}
+              {d.parking && (
+                <InfoRow label={PARKING_KIND_LABELS[d.parking.kind ?? ""] ?? "Parcheggio"}>
+                  {[
+                    d.parking.name,
+                    d.parking.spaces ? `${d.parking.spaces} posti` : null,
+                    d.parking.rate ? `${d.parking.rate} €/h` : null,
+                    `${d.parking.meters} m`,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </InfoRow>
+              )}
+              {d.bikeParking && (
+                <InfoRow label="Sosta biciclette">
+                  {[
+                    d.bikeParking.name,
+                    d.bikeParking.spaces ? `${d.bikeParking.spaces} stalli` : null,
+                    `${d.bikeParking.meters} m`,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </InfoRow>
+              )}
+              {d.parkingZone && (
+                <InfoRow label="Zona di sosta">
+                  {[
+                    d.parkingZone.name,
+                    d.parkingZone.spaces ? `${d.parkingZone.spaces} posti a pagamento` : null,
+                    d.parkingZone.rate ? `${d.parkingZone.rate} €/h` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </InfoRow>
+              )}
               {(d.ateco || d.atecoLabel) && (
                 <InfoRow label="Codice ATECO (Comune)">
                   {d.atecoLabel ? `${d.atecoLabel} (${d.ateco})` : d.ateco}

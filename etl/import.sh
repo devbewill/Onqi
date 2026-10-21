@@ -149,6 +149,29 @@ duckdb -bail -cmd "INSTALL postgres; LOAD postgres; ATTACH '$PG' AS pg (TYPE pos
 echo "==> Assegnazione quartiere"
 psql_ -v area="$AREA" < etl/urban/nil.sql
 
+# --- Contesto urbano: parcheggi e aree di sosta (Comune di Milano) -----------
+PARKING_BASE="https://dati.comune.milano.it/dataset"
+declare -a PARKING_FILES=(
+  "park_pub.geojson|$PARKING_BASE/2f4246df-2949-4530-909a-9016652cc8f9/resource/5d418fa5-a0a0-4fd8-92f2-006f1fa6e0df/download/park_pub.geojson"
+  "park_interscambio.geojson|$PARKING_BASE/411cdd38-56f9-4ff1-b369-a2ed04778d84/resource/63c3e729-55e4-4134-a890-6fb900d7920a/download/park_interscambio.geojson"
+  "sosta_turistici.geojson|$PARKING_BASE/a2d017e4-8b44-49c4-b1f7-856da9ea74a4/resource/c3b4ecc0-0568-43f4-83a9-0ba92e586f94/download/sosta_turistici.geojson"
+  "bike_areesosta.geojson|$PARKING_BASE/0e2c549c-a329-4b42-aae4-b765182b826a/resource/a82829db-6241-423d-9531-251be5892ba4/download/bike_areesosta.geojson"
+  "sosta_ambiti.geojson|$PARKING_BASE/85ed8636-fbd0-4bf6-aaf7-7f3f2f610d48/resource/c871e6f8-954a-4fde-8210-071860eb0dea/download/sosta_ambiti.geojson"
+)
+for entry in "${PARKING_FILES[@]}"; do
+  name="${entry%%|*}"; url="${entry#*|}"
+  if [ ! -f "data/$name" ]; then
+    echo "==> Download $name"
+    curl -sfL -m 300 -o "data/$name.tmp" "$url" && mv "data/$name.tmp" "data/$name"
+  fi
+done
+
+echo "==> Caricamento parcheggi in staging"
+duckdb -bail -cmd "INSTALL postgres; LOAD postgres; ATTACH '$PG' AS pg (TYPE postgres);
+             SET VARIABLE dir='data';" < etl/urban/parking_load.sql
+echo "==> Caricamento parcheggi in parking"
+psql_ < etl/urban/parking.sql
+
 # --- Fermate e linee del trasporto pubblico (GTFS, tabelle cittadine) --------
 if [ "$(psql_ -tAc "SELECT count(*) FROM transit_stops")" = "0" ]; then
   etl/gtfs/import.sh
