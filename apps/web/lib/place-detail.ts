@@ -3,6 +3,11 @@ import { pool } from "@/lib/db";
 export type HoursRow = { weekday: number; opens: string; closes: string; source: string };
 export type SourceRecord = { source: string; sourceId: string; raw: Record<string, unknown>; fetchedAt: string };
 export type EditRecord = { field: string; oldValue: unknown; newValue: unknown; createdAt: string };
+export type TransitInfo = {
+  name: string;
+  meters: number;
+  lines: { code: string | null; type: number }[];
+};
 
 export type PlaceDetail = {
   id: string;
@@ -21,6 +26,8 @@ export type PlaceDetail = {
   email: string | null;
   socials: string[] | null;
   vatNumber: string | null;
+  ateco: string | null;
+  atecoLabel: string | null;
   brand: string | null;
   confidence: number | null;
   status: string;
@@ -28,6 +35,9 @@ export type PlaceDetail = {
   nonPublicReason: string | null;
   lockedFields: string[];
   attributes: Record<string, string>;
+  sourceAttributes: Record<string, string>;
+  nil: string | null;
+  transit: TransitInfo | null;
   openNow: boolean | null;
   hours: HoursRow[];
   sources: SourceRecord[];
@@ -42,9 +52,25 @@ export async function getPlaceDetail(id: string) {
             m.slug AS macro, m.name_it AS "macroName",
             ST_Y(p.geom::geometry) AS lat, ST_X(p.geom::geometry) AS lon,
             p.address, p.postcode, p.city, p.phone, p.website, p.email, p.socials,
-            p.vat_number AS "vatNumber", p.brand, p.confidence, p.status,
+            p.vat_number AS "vatNumber", p.ateco, p.ateco_label AS "atecoLabel", p.brand, p.confidence, p.status,
             p.is_public AS "isPublic", p.non_public_reason AS "nonPublicReason",
-            p.locked_fields AS "lockedFields", p.attributes,
+            p.locked_fields AS "lockedFields", p.attributes, p.source_attributes AS "sourceAttributes",
+            p.nil,
+            (SELECT json_build_object('name', n.stop_name, 'meters', n.meters,
+                                      'lines', coalesce(n.lines, '[]'::json))
+               FROM (SELECT s.stop_name,
+                            round(ST_Distance(s.geom, p.geom))::int AS meters,
+                            (SELECT json_agg(json_build_object('code', r.route_short_name,
+                                                               'type', r.route_type)
+                                              ORDER BY r.route_type, r.route_short_name)
+                               FROM transit_stop_routes sr
+                               JOIN transit_routes r ON r.route_id = sr.route_id
+                              WHERE sr.stop_id = s.stop_id
+                                 OR sr.stop_id = coalesce(s.parent_station, '')
+                                 OR sr.stop_id IN (SELECT c.stop_id FROM transit_stops c
+                                                    WHERE c.parent_station = s.stop_id)) AS lines
+                       FROM transit_stops s
+                      ORDER BY s.geom <-> p.geom LIMIT 1) n) AS "transit",
             onqi_is_open(p.id) AS "openNow",
             coalesce((SELECT json_agg(json_build_object('weekday', h.weekday,
                                                         'opens', to_char(h.opens, 'HH24:MI'),

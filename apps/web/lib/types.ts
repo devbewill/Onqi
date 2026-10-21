@@ -10,6 +10,7 @@ export type NearbyPlace = {
   distance: number;
   lat: number;
   lon: number;
+  nil: string | null;
   address: string | null;
   phone: string | null;
   website: string | null;

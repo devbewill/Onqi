@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import type { HoursRow, PlaceDetail, PlacePatch, SourceRecord } from "@/lib/place-detail";
+import type { HoursRow, PlaceDetail, PlacePatch, SourceRecord, TransitInfo } from "@/lib/place-detail";
 
 type Category = { id: number; name: string; macro: string; macroName: string; isPublic: boolean };
 
@@ -44,7 +44,132 @@ const ATTRIBUTES: { key: string; label: string; osm: string; options?: { value: 
   { key: "delivery", label: "Consegna a domicilio", osm: "delivery", options: YES_NO },
   { key: "payment_cards", label: "Pagamento con carta", osm: "payment:credit_cards", options: YES_NO },
   { key: "wifi", label: "Wi-Fi", osm: "internet_access", options: YES_NO },
+  { key: "diet_vegetarian", label: "Opzioni vegetariane", osm: "diet:vegetarian", options: YES_NO },
+  { key: "diet_vegan", label: "Opzioni vegane", osm: "diet:vegan", options: YES_NO },
+  { key: "diet_gluten_free", label: "Opzioni senza glutine", osm: "diet:gluten_free", options: YES_NO },
 ];
+
+const TRANSIT_TYPE_LABELS: Record<number, string> = { 0: "Tram", 1: "Metro", 3: "Bus" };
+
+function transitText(t: TransitInfo) {
+  const parts = [0, 1, 3]
+    .map((ty) => ({
+      label: TRANSIT_TYPE_LABELS[ty],
+      codes: [
+        ...new Set(
+          t.lines
+            .filter((l) => l.type === ty)
+            .map((l) => (ty === 1 ? `M${l.code}` : l.code))
+            .filter(Boolean) as string[],
+        ),
+      ],
+    }))
+    .filter((g) => g.codes.length)
+    .map((g) => `${g.label} ${g.codes.join(", ")}`);
+  return [...parts, `${t.name} (${t.meters} m)`].join(" · ");
+}
+
+function InfoRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="text-xs text-zinc-500">{label}</span>
+      </div>
+      <div className="mt-0.5 text-sm">{children}</div>
+    </div>
+  );
+}
+
+// Valore di un dettaglio: modificato a mano → dall'import (tag OSM) → tag grezzo.
+function attributeValue(
+  d: PlaceDetail,
+  tags: Record<string, string>,
+  a: (typeof ATTRIBUTES)[number],
+) {
+  return d.attributes[a.key] ?? d.sourceAttributes?.[a.key] ?? osmValue(tags, a.osm);
+}
+
+function DetailsSection({
+  d,
+  tags,
+  save,
+}: {
+  d: PlaceDetail;
+  tags: Record<string, string>;
+  save: SaveFn;
+}) {
+  const [addKey, setAddKey] = useState("");
+  const withValue: typeof ATTRIBUTES = [];
+  const missing: typeof ATTRIBUTES = [];
+  for (const a of ATTRIBUTES) (attributeValue(d, tags, a) === null ? missing : withValue).push(a);
+
+  const render = (a: (typeof ATTRIBUTES)[number]) => {
+    const manual = d.attributes[a.key] ?? null;
+    const value = attributeValue(d, tags, a);
+    const label = manual === null && value !== null ? `${a.label} (da OSM)` : a.label;
+    if (a.options) {
+      return (
+        <SelectField
+          label={label}
+          value={value ?? ""}
+          locked={manual !== null}
+          display={value ? optionLabel(a.options, value) : <Missing />}
+          onSave={async (v) => {
+            await save({ attributes: { [a.key]: v || null } });
+            setAddKey("");
+          }}
+        >
+          <option value="">Non indicato</option>
+          {a.options.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </SelectField>
+      );
+    }
+    return (
+      <EditableField
+        label={label}
+        value={value}
+        locked={manual !== null}
+        multiline={a.key === "description"}
+        onSave={async (v) => {
+          await save({ attributes: { [a.key]: v || null } });
+          setAddKey("");
+        }}
+      />
+    );
+  };
+
+  return (
+    <>
+      {withValue.map((a) => (
+        <div key={a.key}>{render(a)}</div>
+      ))}
+      {missing.length > 0 && (
+        <div>
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="text-xs text-zinc-500">Aggiungi dettaglio</span>
+          </div>
+          <select
+            value=""
+            onChange={(e) => setAddKey(e.target.value)}
+            className="mt-0.5 w-2/3 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm sm:w-1/2"
+          >
+            <option value="">Scegli un campo…</option>
+            {missing.map((a) => (
+              <option key={a.key} value={a.key}>
+                {a.label}
+              </option>
+            ))}
+          </select>
+          {addKey && render(ATTRIBUTES.find((a) => a.key === addKey)!)}
+        </div>
+      )}
+    </>
+  );
+}
 
 function osmTags(sources: SourceRecord[]): Record<string, string> {
   return (sources.find((s) => s.source === "osm")?.raw as Record<string, string>) ?? {};
@@ -545,6 +670,13 @@ export default function PlacePanel({
                 onSave={(v) => save({ vatNumber: v })}
                 hint="11 cifre, verificata con la cifra di controllo"
               />
+              {d.transit && <InfoRow label="Trasporto pubblico">{transitText(d.transit)}</InfoRow>}
+              {(d.ateco || d.atecoLabel) && (
+                <InfoRow label="Codice ATECO (Comune)">
+                  {d.atecoLabel ? `${d.atecoLabel} (${d.ateco})` : d.ateco}
+                </InfoRow>
+              )}
+              {d.nil && <InfoRow label="Quartiere">{d.nil}</InfoRow>}
             </Section>
 
             <Section title="Indirizzo e contatti">
@@ -607,41 +739,7 @@ export default function PlacePanel({
             </Section>
 
             <Section title="Dettagli">
-              {ATTRIBUTES.map((a) => {
-                const manual = d.attributes[a.key] ?? null;
-                const fromOsm = osmValue(tags, a.osm);
-                const value = manual ?? fromOsm;
-                const label = manual === null && fromOsm !== null ? `${a.label} (da OSM)` : a.label;
-                if (a.options) {
-                  return (
-                    <SelectField
-                      key={a.key}
-                      label={label}
-                      value={value ?? ""}
-                      locked={manual !== null}
-                      display={value ? optionLabel(a.options, value) : <Missing />}
-                      onSave={(v) => save({ attributes: { [a.key]: v || null } })}
-                    >
-                      <option value="">Non indicato</option>
-                      {a.options.map((o) => (
-                        <option key={o.value} value={o.value}>
-                          {o.label}
-                        </option>
-                      ))}
-                    </SelectField>
-                  );
-                }
-                return (
-                  <EditableField
-                    key={a.key}
-                    label={label}
-                    value={value}
-                    locked={manual !== null}
-                    multiline={a.key === "description"}
-                    onSave={(v) => save({ attributes: { [a.key]: v || null } })}
-                  />
-                );
-              })}
+              <DetailsSection d={d} tags={tags} save={save} />
             </Section>
 
             <Section title="Stato e visibilità">

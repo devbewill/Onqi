@@ -19,7 +19,6 @@ setWorkerUrl("/maplibre/maplibre-gl-worker.mjs");
 // Naviglio Grande, all'altezza della Darsena: punto di partenza se la posizione
 // non è disponibile o è fuori Milano.
 const DEFAULT_POSITION = { lat: 45.4515, lon: 9.1745 };
-const MILANO = { minLat: 45.38, maxLat: 45.54, minLon: 9.04, maxLon: 9.28 };
 const RADIUS = 500;
 
 const MACRO_COLORS: Record<string, string> = {
@@ -52,11 +51,19 @@ function circleGeoJSON(center: Position, radius: number): GeoJSON.Feature<GeoJSO
   return { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [coords] } };
 }
 
-function inMilano(p: Position) {
-  return p.lat >= MILANO.minLat && p.lat <= MILANO.maxLat && p.lon >= MILANO.minLon && p.lon <= MILANO.maxLon;
+// Il punto è nella zona con dati? Lo chiede al server: la zona coperta cambia
+// con gli import (prima la sola circonvallazione, oggi tutto il comune).
+async function isCovered(p: Position): Promise<boolean> {
+  try {
+    const r = await fetch(`/api/areas?lat=${p.lat}&lon=${p.lon}`);
+    if (!r.ok) return false;
+    return (await r.json()).covered === true;
+  } catch {
+    return false;
+  }
 }
 
-// Posizione reale, se disponibile e dentro Milano; altrimenti un messaggio.
+// Posizione reale: si usa sempre, anche se è fuori dalla zona con dati (avviso).
 function requestPosition(onResult: (p: Position | null, message: string | null) => void) {
   if (!navigator.geolocation) {
     onResult(null, "Posizione non disponibile su questo dispositivo: ti mostro la Darsena.");
@@ -65,8 +72,14 @@ function requestPosition(onResult: (p: Position | null, message: string | null) 
   navigator.geolocation.getCurrentPosition(
     (geo) => {
       const p = { lat: geo.coords.latitude, lon: geo.coords.longitude };
-      if (inMilano(p)) onResult(p, null);
-      else onResult(null, "Sei fuori Milano: ti mostro la Darsena. Tocca la mappa per spostarti.");
+      isCovered(p).then((covered) => {
+        if (covered) onResult(p, null);
+        else
+          onResult(
+            p,
+            `La posizione rilevata (${p.lat.toFixed(4)}, ${p.lon.toFixed(4)}) è fuori dalla zona con dati: la uso comunque, ma qui intorno l'elenco sarà vuoto. Tocca la mappa per spostarti.`,
+          );
+      });
     },
     () => onResult(null, "Posizione non concessa: ti mostro la Darsena. Tocca la mappa per spostarti."),
     { enableHighAccuracy: true, timeout: 10_000 },
@@ -411,7 +424,7 @@ export default function Explorer() {
             <li className="px-4 py-6 text-sm text-zinc-500">
               {searchMode
                 ? "Nessun risultato. Prova un altro nome o un'altra tipologia."
-                : "Nessuna attività qui intorno. Per ora ci sono dati solo nella zona tratteggiata sulla mappa."}
+                : `Nessuna attività entro ${RADIUS} m da qui. I dati coprono tutto il comune di Milano: sposta la mappa o usa la ricerca.`}
             </li>
           )}
           {visible.map((p) => (
