@@ -4,6 +4,42 @@
 \set ON_ERROR_STOP on
 BEGIN;
 
+-- Normalizza un handle/URL di un social nel dominio canonico https://www.
+CREATE OR REPLACE FUNCTION onqi_social_url(platform text, raw text) RETURNS text
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+  SELECT CASE
+    WHEN raw IS NULL THEN NULL
+    ELSE regexp_replace(
+           'https://www.' || platform || '.com/' ||
+           regexp_replace(
+             regexp_replace(
+               regexp_replace(
+                 regexp_replace(
+                   regexp_replace(raw, '^https?://', '', 'i'),
+                   '^www\.', '', 'i'),
+                 '^[a-z0-9-]+\.' || platform || '\.com/', '', 'i'),
+               '^' || platform || '\.com/', '', 'i'),
+             '^@', ''),
+           '/+$', '')
+  END
+$$;
+
+-- Array ordinato dei social OSM, senza duplicati, nell'ordine di priorità richiesto.
+CREATE OR REPLACE FUNCTION onqi_socials_from_tags(t jsonb) RETURNS text[]
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+  WITH ordered AS (
+    SELECT * FROM (VALUES
+      (1, onqi_social_url('facebook', t->>'contact:facebook')),
+      (2, onqi_social_url('facebook', t->>'facebook')),
+      (3, onqi_social_url('instagram', t->>'contact:instagram')),
+      (4, onqi_social_url('instagram', t->>'instagram'))
+    ) AS v(ord, url)
+    WHERE url IS NOT NULL
+  )
+  SELECT array_agg(u.url ORDER BY u.ord)
+  FROM (SELECT DISTINCT ON (url) url, ord FROM ordered ORDER BY url, ord) u
+$$;
+
 -- 1. CAP mancante: dal CAP più frequente tra i 7 punti Overture più vicini.
 UPDATE staging.osm_places s
 SET postcode_inferred = (
@@ -69,6 +105,7 @@ SET name        = CASE WHEN onqi_is_legal_name(p.name) THEN c.name ELSE p.name E
     category_id = c.category_id,
     phone       = coalesce(p.phone, c.t->>'phone', c.t->>'contact:phone'),
     website     = coalesce(p.website, c.t->>'website', c.t->>'contact:website'),
+    socials     = coalesce(p.socials, onqi_socials_from_tags(c.t)),
     vat_number  = coalesce(p.vat_number, onqi_vat_normalize(c.t->>'ref:vatin')),
     email       = coalesce(p.email, c.t->>'email', c.t->>'contact:email'),
     status      = CASE WHEN p.status = 'unverified' THEN 'active' ELSE p.status END,
@@ -83,13 +120,14 @@ WITH new AS MATERIALIZED (
   FROM candidates c
   WHERE NOT EXISTS (SELECT 1 FROM matches m WHERE m.source_id = c.source_id)
 ), ins AS (
-  INSERT INTO places (id, name, category_id, geom, address, postcode, city, phone, website, email,
+  INSERT INTO places (id, name, category_id, geom, address, postcode, city, phone, website, email, socials,
                       brand, vat_number, status)
   SELECT place_id, name, category_id, geom,
          nullif(concat_ws(', ', t->>'addr:street', t->>'addr:housenumber'), ''),
          coalesce(postcode, postcode_inferred), coalesce(t->>'addr:city', 'Milano'),
          coalesce(t->>'phone', t->>'contact:phone'), coalesce(t->>'website', t->>'contact:website'),
-         coalesce(t->>'email', t->>'contact:email'), t->>'brand', onqi_vat_normalize(t->>'ref:vatin'), 'active'
+         coalesce(t->>'email', t->>'contact:email'), onqi_socials_from_tags(t),
+         t->>'brand', onqi_vat_normalize(t->>'ref:vatin'), 'active'
   FROM new
 )
 INSERT INTO matches SELECT source_id, place_id FROM new;
